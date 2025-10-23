@@ -1,0 +1,1 @@
+Here I store all the code I can show and keep for myself, without restrictions of confidentiality issues. This is mostly learning and derivative code, but I'll also add my own code whenever I'm allowed to do it. Be free to read, experiment and download it.
