@@ -69,4 +69,37 @@ adata.obs
 adata = adata[adata.obs.pct_counts_mt < 20]  #Maintain cells with a mitochondrial gene count of less than 20 genes.
 adata = adata[adata.obs.pct_counts_ribo < 2]  #Maintain cells with a ribosomal gene count of less than 2 genes.
 
-# Normalization
+### Normalization 
+
+# #Crucial step, because of the inter and intracell high variations (due to sequencing biases...etc)
+adata.X.sum(axis = 1)
+sc.pp.normalize_total(adata, target_sum=1e4) #Normalize every cell to 10000 UMI
+adata.X.sum(axis = 1)
+sc.pp.log1p(adata) #Change to log counts
+adata.X.sum(axis = 1)
+adata.raw = adata
+
+### Clustering
+ 
+# You can skip to integration step if you have more than one sample
+sc.pp.highly_variable_genes(adata, n_top_genes=2000)
+adata.var
+sc.pl.highly_variable_genes(adata) #For reducing the number of dimensions of the dataset
+adata = adata[:, adata.var.highly_variable] #We keep the 2000 less variable genes
+adata 
+sc.pp.regress_out(adata,['total_counts','pct_counts_mt','pct_counts_ribo']) #Get rid of some of the variations of the data due to processing and sample quality (eg.sequencing artifacts)
+sc.pp.scale(adata, max_value=10) #normalize each gene for the unit variance of that gene
+sc.tl.pca(adata, svd_solver='arpack') #Principal Component Analysis to further reduce the dimensionality of the data
+sc.pl.pca_variance_ratio(adata, log=True,n_pcs=50) #You would expect to see more difference as long as there's a bigger number of PC (PC50 more variance than PC10)
+sc.pp.neighbors(adata, n_pcs = 30) #We pick 30 because in the PCA we see a relative plateau at PC30
+adata.obsp['connectivities'].toarray() #We get a cell to cell matrix
+adata.obsp['distances'].toarray() #We get a cell to cell matrix
+sc.tl.umap(adata) #Project data from 30 dimensions to 2D
+sc.pl.umap(adata)
+sc.tl.leiden(adata, resolution = 0.5) #1 is the maximum number of clusters, 0 is the minimum number
+adata.obs
+sc.pl.umap(adata, color = ['leiden'])
+
+#Integration
+# You can skip integration step if you only have one sample
+
