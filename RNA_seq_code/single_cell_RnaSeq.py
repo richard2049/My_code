@@ -172,5 +172,55 @@ adata = sc.concat(
 adata
 adata.obs
 
+sc.pp.filter_genes(adata, min_cells = 50) # Keep genes that are found at least in 50 of the cells.
+# sc.pp.highly_variable_genes(adata, n_top_genes = 2000, subset = True, flavor = 'seurat_v3')  # Keep the 2000 most relevant genes.
+adata
+# adata.X = csr_matrix(adata.X)
+adata.X
+adata.obs.groupby('Sample').count() # Group data by sample
+adata.layers['counts'] = adata.X.copy() # We save the raw data without integration or further preprocessing
+sc.pp.normalize_total(adata, target_sum=1e4) #Normalize every cell to 10000 UMI
+sc.pp.log1p(adata) #Change to log counts
+adata.raw = adata
+adata
+# If the number of cells is less than 2 times the number of genes, you can apply the following lines:
+    # sc.pp.highly_variable_genes(adata, n_top_genes = 3000, subset = True, layer = 'counts', flavor = 'seurat_v3', batch_key='Sample')  # Keep the 3000 most relevant genes. No batch key if one sample
+
+adata.X = adata.X.tocsr()
+if "counts" not in adata.layers:
+    adata.layers["counts"] = adata.X.copy()
+adata.obs["Sample"] = adata.obs["Sample"].astype("category")
+
+# SCVI
+scvi.model.SCVI.setup_anndata(
+    adata,
+    layer="counts",
+    categorical_covariate_keys=["Sample"],
+    continuous_covariate_keys=["pct_counts_mt", "total_counts", "pct_counts_ribo"]
+)
+model = scvi.model.SCVI(adata)
+model.train(accelerator="gpu", devices=1)
+
+# Latents
+adata.obsm["X_scVI"] = model.get_latent_representation()
+
+# # Normalized: safe version (subset of genes)
+# hvg = adata.var.get("highly_variable", None)
+# if hvg is not None and hvg.sum() > 0:
+#     gene_list = list(adata.var_names[hvg])
+# else:
+#     gene_list = list(adata.var_names[:2000])  # fallback
+
+
+norm = model.get_normalized_expression(library_size=1e4, return_numpy=True)
+norm
+adata.layers['scvi_normalized'] = norm
+sc.pp.neighbors(adata, use_rep = 'X_scVI') #We pick the latent representation to calculate the neighbours
+sc.tl.umap(adata)
+sc.tl.leiden(adata, resolution = 0.5)
+sc.pl.umap(adata, color = ['leiden', 'Sample'], frameon = False) #Leiden is the label for the clusters
+adata.write_h5ad('integrated.h5ad')
+
+
 
 
