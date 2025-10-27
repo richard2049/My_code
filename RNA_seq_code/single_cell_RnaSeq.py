@@ -104,6 +104,9 @@ sc.pl.umap(adata, color = ['leiden'])
 # You can skip integration step if you only have one sample
 def pp(csv_path):
     adata = sc.read_csv(csv_path).T
+    adata.X = sp.csr_matrix(adata.X)
+    adata.X.data = adata.X.data.astype(np.int32, copy=False)
+    adata.layers["counts"] = adata.X.copy()
     sc.pp.filter_genes(adata, min_cells = 10)
     sc.pp.highly_variable_genes(adata, n_top_genes = 2000, subset = True, flavor = 'seurat_v3')
     scvi.model.SCVI.setup_anndata(adata)
@@ -115,9 +118,12 @@ def pp(csv_path):
     df['prediction'] = solo.predict(soft = False)
     df.index = df.index.map(lambda x: x[:-2])
     df['dif'] = df.doublet - df.singlet
-    doublets = df[(df.prediction == 'doublet') & (df.dif > 1)]
+    doublets = df[(df.prediction == 'doublet') & (df.dif > 0.5)]
     
     adata = sc.read_csv(csv_path).T
+    adata.X = sp.csr_matrix(adata.X)
+    adata.X.data = adata.X.data.astype(np.int32, copy=False)
+    adata.layers["counts"] = adata.X.copy()
     adata.obs['Sample'] = csv_path.split('_')[2] #'raw_counts/GSM5226574_C51ctr_raw_counts.csv' Your data will likely be different. You need a different ID for each sample in the Sample column. In this case I used the .csv path returning the second item  divided by '_' character (the C51ctr part, in this case)  
     adata.obs['doublet'] = adata.obs.index.isin(doublets.index)
     adata = adata[~adata.obs.doublet]
@@ -136,8 +142,35 @@ def pp(csv_path):
 
     return adata
 out=[]
-for file in os.listdir("D:/DATA\GSE171524_RAW/Compressed/"):
-    out.append(pp("D:/DATA\GSE171524_RAW/Compressed/"+file))
-   #List of adata objects (26 in this case)
+os.listdir("D:/DATA\GSE171524_RAW/Decompressed/")
+for file in os.listdir("D:/DATA\GSE171524_RAW/Decompressed/"):
+    out.append(pp("D:/DATA\GSE171524_RAW/Decompressed/"+file))
+out[2]   #List of adata objects (26 in this case)
+out
+for i, ad in enumerate(out):
+    ad.X = ad.X.tocsr() if sp.issparse(ad.X) else sp.csr_matrix(ad.X)
+    if ad.X.dtype != np.int32:
+        ad.X.data = ad.X.data.astype(np.int32, copy=False)
+    ad.layers["counts"] = ad.layers.get("counts", ad.X.copy())
+    ad.var_names_make_unique(); ad.obs_names_make_unique()
+    ad.obs["batch"] = i
+    ad.obsm.clear(); ad.varm.clear()  # evita merges densos
+
+adata = sc.concat(
+    out,
+    join="outer",      # switch to inner if you only want the intersecting genes
+    label="batch",
+    merge="same",
+    uns_merge="same",
+    pairwise=False,
+    index_unique=None,
+)
+# test = out[:11]  # o cualquier subconjunto pequeño
+# adata_test = sc.concat(test, join="inner", label="batch", merge="same", uns_merge="same", pairwise=False)
+# print(adata_test.X.shape, getattr(adata_test.X, "nnz", None))
+# adata = sc.concat(out)
+adata
+adata.obs
+
 
 
