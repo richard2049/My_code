@@ -221,6 +221,188 @@ sc.tl.leiden(adata, resolution = 0.5)
 sc.pl.umap(adata, color = ['leiden', 'Sample'], frameon = False) #Leiden is the label for the clusters
 adata.write_h5ad('integrated.h5ad')
 
+""" #Find markers/ label cell types """
+
+sc.tl.rank_genes_groups(adata, 'leiden') # We get the marker genes based just in the raw data and the clustered (leiden) data. This command updates a new layer in the adata object
+sc.pl.rank_genes_groups(adata, n_genes = 20, sharey = False) #The higer the score (upper left) the higher the significance of a gene
+markers = sc.get.rank_genes_groups_df(adata, None) # In this dataframe the group is the leiden cluster
+markers = markers[(markers.pvals_adj < 0.05) & (markers.logfoldchanges > .5)]
+markers
+# markers_scvi = model.differential_expression(groupby = "leiden")
+# markers_scvi = markers_scvi[(markers_scvi['is_de_fdr_0.05']) & (markers_scvi.lfc_mean > .5)]
+from math import sqrt
+from scipy.stats import t as student_t
+
+genes = adata.var_names.to_numpy()     # all genes
+n_cells, n_genes = adata.n_obs, adata.n_vars
+step = 3000                            # gene block size (tune for RAM)
+eps = 1e-8
+
+# groups
+clusters = (list(adata.obs["leiden"].cat.categories)
+            if hasattr(adata.obs["leiden"], "cat") else
+            sorted(adata.obs["leiden"].unique()))
+
+results = []
+for cl in clusters:
+    idx1 = np.where(adata.obs["leiden"].values == cl)[0]
+    idx2 = np.where(adata.obs["leiden"].values != cl)[0]
+    n1, n2 = len(idx1), len(idx2)
+
+    # per-cluster accumulators
+    lfc_all = np.empty(n_genes, dtype=np.float32)
+    t_all   = np.empty(n_genes, dtype=np.float32)
+    pv_all  = np.empty(n_genes, dtype=np.float32)
+
+    # stream across gene blocks
+    pos = 0
+    for s in range(0, n_genes, step):
+        gl = genes[s:s+step].tolist()
+
+        # normalized expression for each group, current block (dense but small)
+        X1 = model.get_normalized_expression(indices=idx1, gene_list=gl,
+                                             library_size=1e4, return_numpy=True).astype(np.float32, copy=False)
+        X2 = model.get_normalized_expression(indices=idx2, gene_list=gl,
+                                             library_size=1e4, return_numpy=True).astype(np.float32, copy=False)
+
+        # means
+        m1 = X1.mean(axis=0)
+        m2 = X2.mean(axis=0)
+
+        # unbiased variances
+        v1 = X1.var(axis=0, ddof=1)
+        v2 = X2.var(axis=0, ddof=1)
+
+        # log2 fold-change
+        lfc = np.log2((m1 + eps) / (m2 + eps))
+
+        # Welch t-stat and p-value (approx.; Bayesian DE needs newer scvi)
+        se  = np.sqrt(v1 / max(n1,1) + v2 / max(n2,1) + eps)
+        t   = (m1 - m2) / se
+        df  = (v1/n1 + v2/n2)**2 / ((v1**2)/((n1**2)*max(n1-1,1)) + (v2**2)/((n2**2)*max(n2-1,1)) + eps)
+        p   = 2 * (1 - student_t.cdf(np.abs(t), df=np.maximum(df, 1)))
+
+        # write into full arrays
+        k = len(gl)
+        lfc_all[pos:pos+k] = lfc
+        t_all[pos:pos+k]   = t
+        pv_all[pos:pos+k]  = p
+        pos += k
+
+        del X1, X2  # free block memory
+
+    res = pd.DataFrame({
+        "gene": genes,
+        "cluster": cl,
+        "log2fc": lfc_all,
+        "tstat": t_all,
+        "pval": pv_all
+    })
+    # Benjamini–Hochberg FDR
+    order = np.argsort(res["pval"].values)
+    ranks = np.empty_like(order); ranks[order] = np.arange(1, len(res)+1)
+    res["qval"] = np.minimum(1.0, res["pval"].values * len(res) / np.maximum(ranks,1))
+    results.append(res)
+
+markers_scvi = pd.concat(results, ignore_index=True)
+markers_scvi = markers_scvi[(markers_scvi["qval"] < 0.05) & (markers_scvi["log2fc"] > 0.585)]  # ~lfc>0.5
+markers_scvi
+sc.pl.umap(adata, color=['leiden'], frameon = False, legend_loc = "on data")
+
+# 1) Recreate the layer on THIS adata
+norm = model.get_normalized_expression(library_size=1e4, return_numpy=True)
+norm = np.asarray(norm, dtype=np.float32)        # ensure 2D float array
+assert norm.shape == adata.shape, (norm.shape, adata.shape)
+adata.layers['scvi_normalized'] = norm
+sc.pp.neighbors(adata, use_rep='X_scVI')
+sc.tl.umap(adata)
+# 2) Sanity checks
+print("layers:", list(adata.layers.keys()))
+print("scvi_normalized shape:", adata.layers['scvi_normalized'].shape)
+
+# 3) Plot explicitly from the layer (no .raw)
+adata.raw = None
+sc.pl.umap(
+    adata,
+    color=['PTPRC', 'CD3E', 'CD4'],
+    layer='scvi_normalized',
+    use_raw=False,
+    frameon=False
+)
+print("is_view:", adata.is_view)
+X_bak = adata.X
+adata.X = adata.layers['scvi_normalized']    # must exist & match shape
+sc.pl.umap(adata, color=['PTPRC','CD3E','CD4'], use_raw=False, frameon=False) #With a resolution of 0.5 we need to increase resolution for being able to distinguish between clusters for different types of cells
+adata.X = X_bak 
+sc.pl.umap(adata, color=['PTPRC','MRC1', 'ZBTB46'], use_raw=False, frameon=False) #DENDRITIC CELLS
+sc.pl.umap(adata, color=['PTPRC','MRC1', 'APOBEC3A'], use_raw=False, frameon=False) # MONOCYTES
+sc.pl.umap(adata, color=['PECAM1'], use_raw=False, frameon=False) # ENDOTHELIAL CELLS
+sc.pl.umap(adata, color=['COL6A2'], frameon=False) # FIBROBLASTS
+sc.pl.umap(adata, color=['AGER', 'SFTPC'], frameon=False) # AT1 AND AT2 RESPECTIVELY
+sc.pl.umap(adata, color=['ACTA2', 'MYL9','PDGFRB'], frameon=False, vmax=5) # ACTA2 FOR SMOOTH MUSCLE AND PERICYTES, PDGFRB IS SPECIFIC FOR PERICYTES
+sc.pl.umap(adata, color=['EPCAM', 'MUC1'], frameon=False, vmax=5) # EPITHELIAL MARKERS
+
+
+markers[markers.names == 'CD4'] # CLUSTER 25 HIGHEST LOGFOLDCHANGES INCREASE, CD4 Positive
+markers[markers.names == 'ZBTB46'] # CLUSTER 3 HIGHEST LOGFOLDCHANGES INCREASE, CD8 Positive
+markers[markers.names == 'APOBEC3A'] # CLUSTER 16 HIGHEST LOGFOLDCHANGES INCREASE, 
+markers[markers.names == 'PECAM1'] # CLUSTER 6 HIGHEST LOGFOLDCHANGES INCREASE, 
+markers[markers.names == 'COL6A2'] # CLUSTERS 2 AND 8 HIGHEST LOGFOLDCHANGES INCREASE, 
+markers[markers.names == 'AGER'] # CLUSTER 4 HIGHEST LOGFOLDCHANGES INCREASE, 
+markers[markers.names == 'SFTPC'] # CLUSTER 1 HIGHEST LOGFOLDCHANGES INCREASE, 
+markers[markers.names == 'ACTA2'] # CLUSTER 2 HIGHEST LOGFOLDCHANGES INCREASE, 
+markers[markers.names == 'PDGFRB'] # CLUSTER 22 HIGHEST LOGFOLDCHANGES INCREASE, 
+markers[markers.names == 'EPCAM'] # CLUSTER 22 HIGHEST LOGFOLDCHANGES INCREASE, 
+markers[markers.names == 'MUC1'] # CLUSTER 22 HIGHEST LOGFOLDCHANGES INCREASE, 
+
+markers_scvi[markers_scvi["cluster"] == "23"] # To obtain the list of genes, either search PanglaoDB for the predominant cell types or...
+sub = markers_scvi[markers_scvi["cluster"].astype(str) == "23"].iloc[:1000] #... select the top 1000 genes and perform an analysis on David
+
+# 1) iterate gene names
+for g in sub["gene"]:
+    print(g)
+markers_scvi[markers_scvi["cluster"] == "20"]
+markers_scvi[markers_scvi["cluster"] == "7"]
+
+cell_type = {"0":"Macrophage",
+"1":"AT2",
+"2":"Fibroblast + Smooth muscle cell",
+"3":"CD8+ T-cell",
+"4":"AT1",
+"5":"Pericyte", 
+"6":"Endothelial cell",
+"7":"Endothelial cell",
+"8": "Fibroblast",
+"9":"AT2",
+"10":"Macrophage",
+"11":"Fibroblast",
+"12":"Macrophage",
+"13":"Monocyte",
+"14":"Airway epithelial",
+"15":"Airway epithelial",
+"16":"Macrophage+Epithelial cells",
+"17":"Airway epithelial",
+"18":"Denditic cell",
+"19":"Aerocyte",
+"20":"T-cell",
+"21":"Smooth muscle cell",
+"22":"Pericyte", 
+"23":"Basal cells",
+"24":"B-cell",
+"25":"CD4+ T-cell",
+"26":"Fibroblast",
+"27":"Erythroid-like",
+"28":"Macrophage"
+}
+adata.obs
+adata.obs.leiden.map(cell_type)
+adata.obs['cell type'] = adata.obs.leiden.map(cell_type)
+sc.pl.umap(adata, color = ['cell type'], frameon = False)
+
+adata.uns['scvi_markers'] = markers_scvi
+adata.uns['markers'] = markers
+adata.write_h5ad('integrated.h5ad')
+model.save('model.model')
 
 
 
